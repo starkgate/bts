@@ -24,7 +24,7 @@ import os
 import random
 import cv2
 
-from distributed_sampler_no_evenly_divisible import *
+import distributed_sampler_no_evenly_divisible
 
 
 def _is_pil_image(img):

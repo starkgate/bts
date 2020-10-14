@@ -24,15 +24,11 @@ import cv2
 import sys
 
 import torch
-import torch.nn as nn
 from torch.autograd import Variable
 from bts_dataloader import *
 
-import errno
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-
-from bts_dataloader import *
 
 def convert_arg_line_to_args(arg_line):
     for arg in arg_line.split():
@@ -48,8 +44,6 @@ parser.add_argument('--encoder', type=str, help='type of encoder, vgg or desenet
                     default='densenet161_bts')
 parser.add_argument('--data_path', type=str, help='path to the data', required=True)
 parser.add_argument('--filenames_file', type=str, help='path to the filenames text file', required=True)
-parser.add_argument('--input_height', type=int, help='input height, images will be resized if needed', default=1600) # TODO remove
-parser.add_argument('--input_width', type=int, help='input width, images will be resized if needed', default=1600) # TODO remove
 parser.add_argument('--max_depth', type=float, help='maximum depth in estimation', default=150)
 parser.add_argument('--checkpoint_path', type=str, help='path to a specific checkpoint to load', default='')
 parser.add_argument('--dataset', type=str, help='dataset to train on, make3d or nyudepthv2', default='nyu')
@@ -67,28 +61,19 @@ if sys.argv.__len__() == 2:
 else:
     args = parser.parse_args()
 
-# TODO remove
-args.output = '/home/u42/Documents/rock/mmdetection/data/test_depth/results'
-args.focal = 721
-args.filenames_file = '/home/u42/Documents/rock/mmdetection/data/test_depth/filenames.txt'
-
 model_dir = os.path.dirname(args.checkpoint_path)
 sys.path.append(model_dir)
 
-"""
 for key, val in vars(__import__(args.model_name)).items():
     if key.startswith('__') and key.endswith('__'):
         continue
     vars()[key] = val
-"""
-from bts_eigen_v2_pytorch_densenet161 import *
 
 def get_num_lines(file_path):
     f = open(file_path, 'r')
     lines = f.readlines()
     f.close()
     return len(lines)
-
 
 def test(params):
     """Test function."""
@@ -160,36 +145,6 @@ def test(params):
 
         pred_depth_scaled = pred_depth_scaled.astype(np.uint16)
         cv2.imwrite(filename_pred_png, pred_depth_scaled, [cv2.IMWRITE_PNG_COMPRESSION, 0])
-        
-        if args.save_lpg:
-            cv2.imwrite(filename_image_png, image[10:-1 - 9, 10:-1 - 9, :])
-            if args.dataset == 'nyu':
-                plt.imsave(filename_gt_png, np.log10(gt[10:-1 - 9, 10:-1 - 9]), cmap='Greys')
-                pred_depth_cropped = pred_depth[10:-1 - 9, 10:-1 - 9]
-                plt.imsave(filename_cmap_png, np.log10(pred_depth_cropped), cmap='Greys')
-                pred_8x8_cropped = pred_8x8[10:-1 - 9, 10:-1 - 9]
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_8x8.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_8x8_cropped), cmap='Greys')
-                pred_4x4_cropped = pred_4x4[10:-1 - 9, 10:-1 - 9]
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_4x4.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_4x4_cropped), cmap='Greys')
-                pred_2x2_cropped = pred_2x2[10:-1 - 9, 10:-1 - 9]
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_2x2.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_2x2_cropped), cmap='Greys')
-                pred_1x1_cropped = pred_1x1[10:-1 - 9, 10:-1 - 9]
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_1x1.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_1x1_cropped), cmap='Greys')
-            else:
-                plt.imsave(filename_cmap_png, np.log10(pred_depth), cmap='Greys')
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_8x8.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_8x8), cmap='Greys')
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_4x4.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_4x4), cmap='Greys')
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_2x2.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_2x2), cmap='Greys')
-                filename_lpg_cmap_png = filename_cmap_png.replace('.png', '_1x1.png')
-                plt.imsave(filename_lpg_cmap_png, np.log10(pred_1x1), cmap='Greys')
-    
     return
 
 test(args)
