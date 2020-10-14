@@ -34,13 +34,11 @@ from tqdm import tqdm
 
 from bts_dataloader import *
 
-
 def convert_arg_line_to_args(arg_line):
     for arg in arg_line.split():
         if not arg.strip():
             continue
         yield arg
-
 
 parser = argparse.ArgumentParser(description='BTS PyTorch implementation.', fromfile_prefix_chars='@')
 parser.convert_arg_line_to_args = convert_arg_line_to_args
@@ -50,14 +48,18 @@ parser.add_argument('--encoder', type=str, help='type of encoder, vgg or desenet
                     default='densenet161_bts')
 parser.add_argument('--data_path', type=str, help='path to the data', required=True)
 parser.add_argument('--filenames_file', type=str, help='path to the filenames text file', required=True)
-parser.add_argument('--input_height', type=int, help='input height', default=480)
-parser.add_argument('--input_width', type=int, help='input width', default=640)
-parser.add_argument('--max_depth', type=float, help='maximum depth in estimation', default=80)
+parser.add_argument('--input_height', type=int, help='input height, images will be resized if needed', default=1600) # TODO remove
+parser.add_argument('--input_width', type=int, help='input width, images will be resized if needed', default=1600) # TODO remove
+parser.add_argument('--max_depth', type=float, help='maximum depth in estimation', default=150)
 parser.add_argument('--checkpoint_path', type=str, help='path to a specific checkpoint to load', default='')
 parser.add_argument('--dataset', type=str, help='dataset to train on, make3d or nyudepthv2', default='nyu')
 parser.add_argument('--do_kb_crop', help='if set, crop input images as kitti benchmark images', action='store_true')
 parser.add_argument('--save_lpg', help='if set, save outputs from lpg layers', action='store_true')
 parser.add_argument('--bts_size', type=int,   help='initial num_filters in bts', default=512)
+parser.add_argument('--output', type=str, help='path to the results', default='~')
+# focal value doesn't really change anything
+parser.add_argument('--focal', type=float, help='override the filenames.txt value for the focal', default=721)
+
 
 if sys.argv.__len__() == 2:
     arg_filename_with_prefix = '@' + sys.argv[1]
@@ -65,14 +67,21 @@ if sys.argv.__len__() == 2:
 else:
     args = parser.parse_args()
 
+# TODO remove
+args.output = '/home/u42/Documents/rock/mmdetection/data/test_depth/results'
+args.focal = 721
+args.filenames_file = '/home/u42/Documents/rock/mmdetection/data/test_depth/filenames.txt'
+
 model_dir = os.path.dirname(args.checkpoint_path)
 sys.path.append(model_dir)
 
+"""
 for key, val in vars(__import__(args.model_name)).items():
     if key.startswith('__') and key.endswith('__'):
         continue
     vars()[key] = val
-
+"""
+from bts_eigen_v2_pytorch_densenet161 import *
 
 def get_num_lines(file_path):
     f = open(file_path, 'r')
@@ -84,7 +93,7 @@ def get_num_lines(file_path):
 def test(params):
     """Test function."""
     args.mode = 'test'
-    dataloader = BtsDataLoader(args, 'test')
+    dataloader = BtsDataLoader(args)
     
     model = BtsModel(params=args)
     model = torch.nn.DataParallel(model)
@@ -111,7 +120,7 @@ def test(params):
     with torch.no_grad():
         for _, sample in enumerate(tqdm(dataloader.data)):
             image = Variable(sample['image'].cuda())
-            focal = Variable(sample['focal'].cuda())
+            focal = Variable(torch.cuda.FloatTensor(args.focal))
             # Predict
             lpg8x8, lpg4x4, lpg2x2, reduc1x1, depth_est = model(image, focal)
             pred_depths.append(depth_est.cpu().numpy().squeeze())
@@ -121,49 +130,20 @@ def test(params):
             pred_1x1s.append(reduc1x1[0].cpu().numpy().squeeze())
 
     elapsed_time = time.time() - start_time
-    print('Elapesed time: %s' % str(elapsed_time))
+    print('Elapsed time: %s' % str(elapsed_time))
     print('Done.')
-    
-    save_name = 'result_' + args.model_name
-    
     print('Saving result pngs..')
-    if not os.path.exists(os.path.dirname(save_name)):
-        try:
-            os.mkdir(save_name)
-            os.mkdir(save_name + '/raw')
-            os.mkdir(save_name + '/cmap')
-            os.mkdir(save_name + '/rgb')
-            os.mkdir(save_name + '/gt')
-        except OSError as e:
-            if e.errno != errno.EEXIST:
-                raise
-    
+
     for s in tqdm(range(num_test_samples)):
-        if args.dataset == 'kitti':
-            date_drive = lines[s].split('/')[1]
-            filename_pred_png = save_name + '/raw/' + date_drive + '_' + lines[s].split()[0].split('/')[-1].replace(
-                '.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + date_drive + '_' + lines[s].split()[0].split('/')[
-                -1].replace('.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + date_drive + '_' + lines[s].split()[0].split('/')[-1]
-        elif args.dataset == 'kitti_benchmark':
-            filename_pred_png = save_name + '/raw/' + lines[s].split()[0].split('/')[-1].replace('.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + lines[s].split()[0].split('/')[-1].replace('.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + lines[s].split()[0].split('/')[-1]
-        else:
-            scene_name = lines[s].split()[0].split('/')[0]
-            filename_pred_png = save_name + '/raw/' + scene_name + '_' + lines[s].split()[0].split('/')[1].replace(
-                '.jpg', '.png')
-            filename_cmap_png = save_name + '/cmap/' + scene_name + '_' + lines[s].split()[0].split('/')[1].replace(
-                '.jpg', '.png')
-            filename_gt_png = save_name + '/gt/' + scene_name + '_' + lines[s].split()[0].split('/')[1].replace(
-                '.jpg', '.png')
-            filename_image_png = save_name + '/rgb/' + scene_name + '_' + lines[s].split()[0].split('/')[1]
-        
-        rgb_path = os.path.join(args.data_path, './' + lines[s].split()[0])
+        filename = lines[s].split()[0].split('/')[-1].split('.')[0]
+        filename = "{}_{}_{}_{}.png".format(filename, args.max_depth, args.focal, args.model_name)
+        filename_pred_png = os.path.join(args.output, filename)
+
+        rgb_path = os.path.join(args.data_path, lines[s].split()[0])
         image = cv2.imread(rgb_path)
+
         if args.dataset == 'nyu':
-            gt_path = os.path.join(args.data_path, './' + lines[s].split()[1])
+            gt_path = os.path.join(args.data_path, lines[s].split()[1])
             gt = cv2.imread(gt_path, -1).astype(np.float32) / 1000.0  # Visualization purpose only
             gt[gt == 0] = np.amax(gt)
         
@@ -177,7 +157,7 @@ def test(params):
             pred_depth_scaled = pred_depth * 256.0
         else:
             pred_depth_scaled = pred_depth * 1000.0
-        
+
         pred_depth_scaled = pred_depth_scaled.astype(np.uint16)
         cv2.imwrite(filename_pred_png, pred_depth_scaled, [cv2.IMWRITE_PNG_COMPRESSION, 0])
         
@@ -212,6 +192,4 @@ def test(params):
     
     return
 
-
-if __name__ == '__main__':
-    test(args)
+test(args)
