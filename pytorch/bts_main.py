@@ -14,29 +14,22 @@
 # You should have received a copy of the GNU General Public License
 # along with this program. If not, see <http://www.gnu.org/licenses/>
 
-import time
 import argparse
-import datetime
-import sys
 import os
-
-import torch
-import torch.nn as nn
-import torch.nn.utils as utils
-
-import torch.backends.cudnn as cudnn
-import torch.distributed as dist
-import torch.multiprocessing as mp
-
-from tensorboardX import SummaryWriter
+import sys
+import time
 
 import matplotlib
 import matplotlib.cm
-import threading
-from tqdm import tqdm
-
+import torch
+import torch.backends.cudnn as cudnn
+import torch.distributed as dist
+import torch.multiprocessing as mp
 from bts import BtsModel
 from bts_dataloader import *
+from tensorboardX import SummaryWriter
+from tqdm import tqdm
+from shutil import copy
 
 
 def convert_arg_line_to_args(arg_line):
@@ -51,17 +44,20 @@ parser.convert_arg_line_to_args = convert_arg_line_to_args
 
 parser.add_argument('--mode',                      type=str,   help='train or test', default='train')
 parser.add_argument('--model_name',                type=str,   help='model name', default='bts_eigen_v2')
-parser.add_argument('--encoder',                   type=str,   help='type of encoder, desenet121_bts, densenet161_bts, '
+parser.add_argument('--focal',                     type=float,   help='focal size')
+parser.add_argument('--encoder',                   type=str,   help='type of encoder, densenet121_bts, densenet161_bts, '
                                                                     'resnet101_bts, resnet50_bts, resnext50_bts or resnext101_bts',
                                                                default='densenet161_bts')
 # Dataset
-parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti or nyu', default='nyu')
+parser.add_argument('--dataset',                   type=str,   help='dataset to train on, kitti or nyu', default='custom')
 parser.add_argument('--data_path',                 type=str,   help='path to the data', required=True)
 parser.add_argument('--gt_path',                   type=str,   help='path to the groundtruth data', required=True)
 parser.add_argument('--filenames_file',            type=str,   help='path to the filenames text file', required=True)
-parser.add_argument('--input_height',              type=int,   help='input height', default=480)
-parser.add_argument('--input_width',               type=int,   help='input width',  default=640)
-parser.add_argument('--max_depth',                 type=float, help='maximum depth in estimation', default=10)
+parser.add_argument('--image_height',              type=int,   help='image height', default=512) # 512x1024 and above requires too much VRAM
+parser.add_argument('--image_width',               type=int,   help='image width',  default=512)
+parser.add_argument('--input_size',                type=int,   help='input size, cropped and augmented square images input into the network',  default=256)
+parser.add_argument('--augment',                   type=int,   help='how many times each image should be augmented',  default=10)
+parser.add_argument('--max_depth',                 type=float, help='maximum depth in estimation', default=4)
 
 # Log and save
 parser.add_argument('--log_directory',             type=str,   help='directory to save checkpoints and summaries', default='')
@@ -90,12 +86,12 @@ parser.add_argument('--do_kb_crop',                            help='if set, cro
 parser.add_argument('--use_right',                             help='if set, will randomly use right images when train on KITTI', action='store_true')
 
 # Multi-gpu training
-parser.add_argument('--num_threads',               type=int,   help='number of threads to use for data loading', default=1)
+parser.add_argument('--num_threads',               type=int,   help='number of threads to use for data loading', default=0) # SET TO 0 TO BE ABLE TO DEBUG THE DATALOADER!!
 parser.add_argument('--world_size',                type=int,   help='number of nodes for distributed training', default=1)
 parser.add_argument('--rank',                      type=int,   help='node rank for distributed training', default=0)
 parser.add_argument('--dist_url',                  type=str,   help='url used to set up distributed training', default='tcp://127.0.0.1:1234')
 parser.add_argument('--dist_backend',              type=str,   help='distributed backend', default='nccl')
-parser.add_argument('--gpu',                       type=int,   help='GPU id to use.', default=None)
+parser.add_argument('--gpu',                       type=int,   help='GPU id to use.', default=0)
 parser.add_argument('--multiprocessing_distributed',           help='Use multi-processing distributed training to launch '
                                                                     'N processes per node, which has N GPUs. This is the '
                                                                     'fastest way to use PyTorch for either single node or '
@@ -124,10 +120,10 @@ if args.mode == 'train' and not args.checkpoint_path:
 
 elif args.mode == 'train' and args.checkpoint_path:
     model_dir = os.path.dirname(args.checkpoint_path)
-    model_name = os.path.basename(model_dir)
     import sys
+    model_code = os.path.join("{}_pytorch_{}".format(args.model_name, args.encoder))
     sys.path.append(model_dir)
-    for key, val in vars(__import__(model_name)).items():
+    for key, val in vars(__import__(model_code)).items():
         if key.startswith('__') and key.endswith('__'):
             continue
         vars()[key] = val
@@ -140,6 +136,8 @@ inv_normalize = transforms.Normalize(
 
 eval_metrics = ['silog', 'abs_rel', 'log10', 'rms', 'sq_rel', 'log_rms', 'd1', 'd2', 'd3']
 
+# focal = (image_width / 2) / tan(FOV / 2), in this dataset FOV = 0.887981
+args.focal = (args.image_width / 2) / np.tan(0.887981 / 2)
 
 def compute_errors(gt, pred):
     thresh = np.maximum((gt / pred), (pred / gt))
@@ -401,12 +399,12 @@ def main_worker(gpu, ngpus_per_node, args):
 
     cudnn.benchmark = True
 
-    dataloader = BtsDataLoader(args, 'train')
-    dataloader_eval = BtsDataLoader(args, 'online_eval')
+    dataloader = BtsDataLoader(args)
+    dataloader_eval = BtsDataLoader(args)
 
     # Logging
     if not args.multiprocessing_distributed or (args.multiprocessing_distributed and args.rank % ngpus_per_node == 0):
-        writer = SummaryWriter(args.log_directory + '/' + args.model_name + '/summaries', flush_secs=30)
+        writer = SummaryWriter(os.path.join(args.log_directory, args.model_name, 'summaries'), flush_secs=30)
         if args.do_online_eval:
             if args.eval_summary_directory != '':
                 eval_summary_path = os.path.join(args.eval_summary_directory, args.model_name)
@@ -440,6 +438,7 @@ def main_worker(gpu, ngpus_per_node, args):
             optimizer.zero_grad()
             before_op_time = time.time()
 
+            mask = torch.autograd.Variable(sample_batched['mask'].cuda(args.gpu, non_blocking=True))
             image = torch.autograd.Variable(sample_batched['image'].cuda(args.gpu, non_blocking=True))
             focal = torch.autograd.Variable(sample_batched['focal'].cuda(args.gpu, non_blocking=True))
             depth_gt = torch.autograd.Variable(sample_batched['depth'].cuda(args.gpu, non_blocking=True))
@@ -448,10 +447,10 @@ def main_worker(gpu, ngpus_per_node, args):
 
             if args.dataset == 'nyu':
                 mask = depth_gt > 0.1
-            else:
+            elif args.dataset == 'kitti':
                 mask = depth_gt > 1.0
 
-            loss = silog_criterion.forward(depth_est, depth_gt, mask.to(torch.bool))
+            loss = silog_criterion.forward(depth_est, depth_gt, mask.to('cuda:0'))
             loss.backward()
             for param_group in optimizer.param_groups:
                 current_lr = (args.learning_rate - end_learning_rate) * (1 - global_step / num_total_steps) ** 0.9 + end_learning_rate
@@ -542,7 +541,6 @@ def main_worker(gpu, ngpus_per_node, args):
                 block_print()
                 set_misc(model)
                 enable_print()
-
             model_just_loaded = False
             global_step += 1
 
@@ -554,31 +552,27 @@ def main():
         print('bts_main.py is only for training. Use bts_test.py instead.')
         return -1
 
-    model_filename = args.model_name + '.py'
-    command = 'mkdir ' + args.log_directory + '/' + args.model_name
-    os.system(command)
+    bts_path = os.path.dirname(sys.argv[0])
 
-    args_out_path = args.log_directory + '/' + args.model_name + '/' + sys.argv[1]
-    command = 'cp ' + sys.argv[1] + ' ' + args_out_path
-    os.system(command)
+    # set up log directory
+    logs_path = os.path.join(args.log_directory, args.model_name)
+    if not os.path.isdir(logs_path):
+        os.mkdir(logs_path)
 
+    # copy model python file to log
+    model_filename = "{}_pytorch_{}.py".format(args.model_name, args.encoder)
+    model_path = os.path.join(args.log_directory, model_filename)
+    if not os.path.isfile(model_path):
+        copy(os.path.join(bts_path, model_filename), model_path)
+
+    model_out_path = os.path.join(args.log_directory, args.model_name, model_filename)
     if args.checkpoint_path == '':
-        model_out_path = args.log_directory + '/' + args.model_name + '/' + model_filename
-        command = 'cp bts.py ' + model_out_path
-        os.system(command)
-        aux_out_path = args.log_directory + '/' + args.model_name + '/.'
-        command = 'cp bts_main.py ' + aux_out_path
-        os.system(command)
-        command = 'cp bts_dataloader.py ' + aux_out_path
-        os.system(command)
+        aux_out_path = os.path.join(args.log_directory, args.model_name)
+        copy(os.path.join(bts_path, "bts.py"), aux_out_path)
+        copy(os.path.join(bts_path, "bts_main.py"), aux_out_path)
+        copy(os.path.join(bts_path, "bts_dataloader.py"), aux_out_path)
     else:
-        loaded_model_dir = os.path.dirname(args.checkpoint_path)
-        loaded_model_name = os.path.basename(loaded_model_dir)
-        loaded_model_filename = loaded_model_name + '.py'
-
-        model_out_path = args.log_directory + '/' + args.model_name + '/' + model_filename
-        command = 'cp ' + loaded_model_dir + '/' + loaded_model_filename + ' ' + model_out_path
-        os.system(command)
+        copy(os.path.join(model_code) + '.py', model_out_path)
 
     torch.cuda.empty_cache()
     args.distributed = args.world_size > 1 or args.multiprocessing_distributed
